@@ -31,3 +31,6 @@ target/
 
 # Dev update config
 dev-app-update.yml
+
+# Claude Code
+.claude/
