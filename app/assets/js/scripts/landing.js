@@ -452,7 +452,27 @@ async function dlAsync(login = true) {
 
     const loggerLaunchSuite = LoggerUtil.getLogger('LaunchSuite')
 
+    // Global progress helper — maps each phase to a slice of the 0-100% bar.
+    const phaseRanges = {
+        loadInfo:    [0,   5],
+        validate:    [5,  40],
+        download:    [40, 65],
+        prepare:     [65, 75],
+        build:       [75, 80],
+        modLoader:   [80, 85],
+        modsLoading: [85, 90],
+        resources:   [90, 95],
+        gameReady:   [95, 100]
+    }
+    const setPhaseProgress = (phase, localPercent) => {
+        const [min, max] = phaseRanges[phase]
+        const global = Math.trunc(min + (max - min) * (localPercent / 100))
+        setLaunchPercentage(global)
+    }
+
     setLaunchDetails(Lang.queryJS('landing.dlAsync.loadingServerInfo'))
+    toggleLaunchArea(true)
+    setPhaseProgress('loadInfo', 0)
 
     let distro
 
@@ -465,6 +485,8 @@ async function dlAsync(login = true) {
         return
     }
 
+    setPhaseProgress('loadInfo', 100)
+
     const serv = distro.getServerById(ConfigManager.getSelectedServer())
 
     if(login) {
@@ -475,8 +497,6 @@ async function dlAsync(login = true) {
     }
 
     setLaunchDetails(Lang.queryJS('landing.dlAsync.pleaseWait'))
-    toggleLaunchArea(true)
-    setLaunchPercentage(0, 100)
 
     const fullRepairModule = new FullRepair(
         ConfigManager.getCommonDirectory(),
@@ -504,25 +524,27 @@ async function dlAsync(login = true) {
     let invalidFileCount = 0
     try {
         invalidFileCount = await fullRepairModule.verifyFiles(percent => {
-            setLaunchPercentage(percent)
+            setPhaseProgress('validate', percent)
         })
-        setLaunchPercentage(100)
+        setPhaseProgress('validate', 100)
     } catch (err) {
         loggerLaunchSuite.error('Error during file validation.')
         showLaunchFailure(Lang.queryJS('landing.dlAsync.errorDuringFileVerificationTitle'), err.displayable || Lang.queryJS('landing.dlAsync.seeConsoleForDetails'))
         return
     }
-    
+
 
     if(invalidFileCount > 0) {
         loggerLaunchSuite.info('Downloading files.')
         setLaunchDetails(Lang.queryJS('landing.dlAsync.downloadingFiles'))
-        setLaunchPercentage(0)
         try {
             await fullRepairModule.download(percent => {
-                setDownloadPercentage(percent)
+                setPhaseProgress('download', percent)
+                remote.getCurrentWindow().setProgressBar(
+                    (phaseRanges.download[0] + (phaseRanges.download[1] - phaseRanges.download[0]) * (percent / 100)) / 100
+                )
             })
-            setDownloadPercentage(100)
+            setPhaseProgress('download', 100)
         } catch(err) {
             loggerLaunchSuite.error('Error during file download.')
             showLaunchFailure(Lang.queryJS('landing.dlAsync.errorDuringFileDownloadTitle'), err.displayable || Lang.queryJS('landing.dlAsync.seeConsoleForDetails'))
@@ -530,6 +552,7 @@ async function dlAsync(login = true) {
         }
     } else {
         loggerLaunchSuite.info('No invalid files, skipping download.')
+        setPhaseProgress('download', 100)
     }
 
     // Remove download bar.
@@ -538,6 +561,7 @@ async function dlAsync(login = true) {
     fullRepairModule.destroyReceiver()
 
     setLaunchDetails(Lang.queryJS('landing.dlAsync.preparingToLaunch'))
+    setPhaseProgress('prepare', 0)
 
     const mojangIndexProcessor = new MojangIndexProcessor(
         ConfigManager.getCommonDirectory(),
@@ -549,18 +573,38 @@ async function dlAsync(login = true) {
     )
 
     const modLoaderData = await distributionIndexProcessor.loadModLoaderVersionJson(serv)
+    setPhaseProgress('prepare', 50)
     const versionData = await mojangIndexProcessor.getVersionJson()
+    setPhaseProgress('prepare', 100)
 
     if(login) {
         const authUser = ConfigManager.getSelectedAccount()
         loggerLaunchSuite.info(`Sending selected account (${authUser.displayName}) to ProcessBuilder.`)
         let pb = new ProcessBuilder(serv, versionData, modLoaderData, authUser, remote.app.getVersion())
         setLaunchDetails(Lang.queryJS('landing.dlAsync.launchingGame'))
+        setPhaseProgress('build', 50)
 
         // const SERVER_JOINED_REGEX = /\[.+\]: \[CHAT\] [a-zA-Z0-9_]{1,16} joined the game/
         const SERVER_JOINED_REGEX = new RegExp(`\\[.+\\]: \\[CHAT\\] ${authUser.displayName} joined the game`)
 
+        // Regex patterns to track Minecraft loading stages via stdout.
+        const MODLOADER_REGEX = /Loading Minecraft .+ with Fabric Loader|MinecraftForge .+ Initialized|ModLauncher .+ starting/
+        const MODS_LOADING_REGEX = /Loading \d+ mods?|Loaded \d+ mods?|FabricLoader .+ mods|Applying mixin/i
+        const RESOURCES_REGEX = /Reloading ResourceManager|Loading Resource Packs|Preparing level|Building terrain/i
+        const GAME_VISIBLE_REGEX = /Sound engine started|Created:.*x.*@/
+
+        // Regex to capture individual mod initialization (Fabric/Forge).
+        const MOD_INIT_REGEX = /\]: Loading .+ (\S+)$|\]: Loaded mod (\S+)|Injecting .+ into (\S+)|Loading entry point .+ for mod (\S+)/i
+        // Track total mods and loaded count for sub-progress.
+        const TOTAL_MODS_REGEX = /Loading (\d+) mods?/
+        let totalMods = 0
+        let loadedModCount = 0
+
+        let gameLoadPhase = 'build'
+
         const onLoadComplete = () => {
+            setLaunchDetails(Lang.queryJS('landing.dlAsync.doneEnjoyServer'))
+            setPhaseProgress('gameReady', 100)
             toggleLaunchArea(false)
             if(hasRPC){
                 DiscordWrapper.updateDetails(Lang.queryJS('landing.discord.loading'))
@@ -572,11 +616,42 @@ async function dlAsync(login = true) {
         const start = Date.now()
 
         // Attach a temporary listener to the client output.
-        // Will wait for a certain bit of text meaning that
-        // the client application has started, and we can hide
-        // the progress bar stuff.
+        // Tracks game loading stages to update the progress bar
+        // until the game is actually visible.
         const tempListener = function(data){
-            if(GAME_LAUNCH_REGEX.test(data.trim())){
+            const line = data.trim()
+
+            if(gameLoadPhase === 'build' && MODLOADER_REGEX.test(line)){
+                gameLoadPhase = 'modLoader'
+                setLaunchDetails(Lang.queryJS('landing.dlAsync.loadingModLoader'))
+                setPhaseProgress('modLoader', 50)
+            }
+            if(gameLoadPhase === 'modLoader' && MODS_LOADING_REGEX.test(line)){
+                gameLoadPhase = 'modsLoading'
+                const totalMatch = line.match(TOTAL_MODS_REGEX)
+                if(totalMatch){
+                    totalMods = parseInt(totalMatch[1])
+                }
+                setLaunchDetails(Lang.queryJS('landing.dlAsync.loadingMods'))
+                setPhaseProgress('modsLoading', 0)
+            }
+            if(gameLoadPhase === 'modsLoading'){
+                const modMatch = line.match(MOD_INIT_REGEX)
+                if(modMatch){
+                    const modName = modMatch[1] || modMatch[2] || modMatch[3] || modMatch[4]
+                    loadedModCount++
+                    const subPercent = totalMods > 0 ? Math.min(Math.trunc((loadedModCount / totalMods) * 100), 99) : Math.min(loadedModCount * 2, 99)
+                    setLaunchDetails(Lang.queryJS('landing.dlAsync.loadingModName', { modName }))
+                    setPhaseProgress('modsLoading', subPercent)
+                }
+            }
+            if((gameLoadPhase === 'modsLoading' || gameLoadPhase === 'modLoader') && RESOURCES_REGEX.test(line)){
+                gameLoadPhase = 'resources'
+                setLaunchDetails(Lang.queryJS('landing.dlAsync.loadingResources'))
+                setPhaseProgress('resources', 50)
+            }
+            if(GAME_VISIBLE_REGEX.test(line)){
+                gameLoadPhase = 'gameReady'
                 const diff = Date.now()-start
                 if(diff < MIN_LINGER) {
                     setTimeout(onLoadComplete, MIN_LINGER-diff)
@@ -612,7 +687,7 @@ async function dlAsync(login = true) {
             proc.stdout.on('data', tempListener)
             proc.stderr.on('data', gameErrorListener)
 
-            setLaunchDetails(Lang.queryJS('landing.dlAsync.doneEnjoyServer'))
+            setPhaseProgress('build', 100)
 
             // Init Discord Hook
             if(distro.rawDistribution.discord != null && serv.rawServer.discord != null){
