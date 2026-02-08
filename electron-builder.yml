@@ -1,6 +1,6 @@
 appId: 'zoolauncher'
 productName: 'Zoo Launcher'
-artifactName: '${productName}-setup-${version}.${ext}'
+artifactName: 'Zoo-Launcher-setup-${version}.${ext}'
 
 copyright: 'Copyright © 2026 YoCsusu'
 
