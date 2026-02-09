@@ -7,7 +7,13 @@ const logger = LoggerUtil.getLogger('ConfigManager')
 
 const sysRoot = process.env.APPDATA || (process.platform == 'darwin' ? process.env.HOME + '/Library/Application Support' : process.env.HOME)
 
-const dataPath = path.join(sysRoot, '.helioslauncher')
+const dataPath = path.join(sysRoot, '.zoolauncher')
+
+// Migration depuis l'ancien dossier
+const oldDataPath = path.join(sysRoot, '.helioslauncher')
+if(!fs.existsSync(dataPath) && fs.existsSync(oldDataPath)){
+    fs.moveSync(oldDataPath, dataPath)
+}
 
 const launcherDir = require('@electron/remote').app.getPath('userData')
 
