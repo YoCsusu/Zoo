@@ -154,6 +154,10 @@ exports.load = function(){
         }
         if(doValidate){
             config = validateKeySet(DEFAULT_CONFIG, config)
+            // Migrate dataDirectory from old .helioslauncher path
+            if(config.settings.launcher.dataDirectory && config.settings.launcher.dataDirectory.includes('.helioslauncher')){
+                config.settings.launcher.dataDirectory = config.settings.launcher.dataDirectory.replace('.helioslauncher', '.zoolauncher')
+            }
             exports.save()
         }
     }
