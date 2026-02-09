@@ -17,6 +17,12 @@ if(!fs.existsSync(dataPath) && fs.existsSync(oldDataPath)){
 
 const launcherDir = require('@electron/remote').app.getPath('userData')
 
+// Migration du dossier userData Electron (helioslauncher -> zoolauncher)
+const oldLauncherDir = path.join(path.dirname(launcherDir), 'helioslauncher')
+if(!fs.existsSync(launcherDir) && fs.existsSync(oldLauncherDir)){
+    fs.moveSync(oldLauncherDir, launcherDir)
+}
+
 /**
  * Retrieve the absolute path of the launcher directory.
  * 
